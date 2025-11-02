@@ -1,9 +1,14 @@
+numpy
 streamlit
 pdfplumber
-langchain
-langchain-community
+langchain-core
+langchain-text-splitters
+langchain-huggingface
+langchain-chroma
+langchain-classic
 chromadb
 sentence-transformers
 huggingface-hub
 python-dotenv
-langchain-text-splitters
+transformers
+tokenizers

@@ -1,16 +1,16 @@
 import os
 import shutil
+import time
 import streamlit as st
 import pdfplumber
 import tempfile
 from dotenv import load_dotenv
 
-# Modern imports
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from huggingface_hub import InferenceClient
+
 from langchain_core.prompts import ChatPromptTemplate
 
 # -----------------------------
@@ -19,16 +19,21 @@ from langchain_core.prompts import ChatPromptTemplate
 load_dotenv()
 
 HF_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "HuggingFaceH4/zephyr-7b-beta")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 CHROMA_DB_DIR = os.getenv("CHROMA_DB_DIR", "chroma_langchain_hf")
 
 if HF_TOKEN:
     os.environ["HUGGINGFACEHUB_API_TOKEN"] = HF_TOKEN
 
-# Clear the ChromaDB directory at the start
+# Clear old Chroma cache (optional)
 if os.path.exists(CHROMA_DB_DIR):
-    shutil.rmtree(CHROMA_DB_DIR)
+    for i in range(5):
+        try:
+            shutil.rmtree(CHROMA_DB_DIR)
+            break
+        except PermissionError:
+            time.sleep(1)
 
 # -----------------------------
 # ⚙️ Streamlit setup
@@ -41,10 +46,7 @@ st.caption("Upload a PDF and ask questions about its content using a Hugging Fac
 # 🤗 Model selection (sidebar)
 # -----------------------------
 st.sidebar.header("⚙️ Model Settings")
-model_name = st.sidebar.text_input(
-    "Model name (repo ID)",
-    value=DEFAULT_MODEL
-)
+model_name = st.sidebar.text_input("Model name (repo ID)", value=DEFAULT_MODEL)
 
 if not HF_TOKEN:
     st.warning("No Hugging Face token found. Add it to your .env file.")
@@ -94,56 +96,56 @@ if uploaded_file:
             persist_directory=CHROMA_DB_DIR,
             embedding_function=embeddings
         )
-        st.success("Chunking and embedding is done successfully!")
     else:
         vectordb = Chroma.from_texts(
             texts=texts,
             embedding=embeddings,
             persist_directory=CHROMA_DB_DIR
         )
-        st.success("Chunking and embedding is done successfully!")
+    st.success("Chunking and embedding completed successfully!")
 
     retriever = vectordb.as_retriever(search_kwargs={"k": 3})
 
     # -----------------------------
-    # 🧠 LLM (Hugging Face Endpoint)
+    # 🧠 Hugging Face Client (LLM)
     # -----------------------------
-    llm = HuggingFaceEndpoint(
-        repo_id=model_name,
-        task="text-generation",
-        temperature=0.1,
-        max_new_tokens=512,
-        huggingfacehub_api_token=HF_TOKEN
-    )
+    HF_MODEL_ID = model_name
+    client = InferenceClient(model=HF_MODEL_ID, token=HF_TOKEN)
 
-    # -----------------------------
-    # 📝 Retrieval setup
-    # -----------------------------
-    prompt_template = """Answer the user's question based on the provided context.
-If you don't know the answer, just say that you don't know, don't try to make up an answer.
-
-Context:
-{context}
-
-Question:
-{input}"""
-
-    prompt = ChatPromptTemplate.from_template(prompt_template)
-    doc_chain = create_stuff_documents_chain(llm, prompt)
-    retrieval_chain = create_retrieval_chain(retriever, doc_chain)
+    def call_llm(prompt):
+        response = client.chat_completion(
+            model=HF_MODEL_ID,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=512,
+        )
+        return response.choices[0].message["content"]
 
     # -----------------------------
     # 💬 Ask a question
     # -----------------------------
-    st.success("You can now ask your question")
+    st.success("You can now ask your question:")
     query = st.text_input("Ask a question about your PDF:")
 
     if query:
         with st.spinner("🤖 Thinking..."):
-            result = retrieval_chain.invoke({"input": query})
+            docs = retriever.invoke(query)
+            context = "\n\n".join([d.page_content for d in docs])
+
+            prompt_template = """Answer the user's question based on the provided context.
+    If you don't know the answer, just say that you don't know, don't try to make up an answer.
+
+    Context:
+    {context}
+
+    Question:
+    {question}"""
+
+            prompt = prompt_template.format(context=context, question=query)
+            answer = call_llm(prompt)
 
         st.subheader("💡 Answer")
-        st.write(result["answer"])
+        st.write(answer)
 
         with st.expander("📘 Retrieved Context"):
-            st.write(result.get("context", "No context retrieved."))
+            st.write(context)
+
